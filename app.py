@@ -1,4 +1,11 @@
+# ---------- BOOT & SAFE PROXY CLEANUP ----------
 import os
+
+# ВАЖНО: убираем прокси из окружения, иначе openai падал с
+# TypeError: Client.__init__() got an unexpected keyword argument 'proxies'
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_k, None)
+
 import time
 import asyncio
 import aiosqlite
@@ -6,7 +13,6 @@ from typing import Optional
 
 from telegram import (
     Update, LabeledPrice, InlineKeyboardMarkup, InlineKeyboardButton,
-    MessageEntity
 )
 from telegram.ext import (
     Application, ApplicationBuilder, ContextTypes,
@@ -17,7 +23,7 @@ from telegram.ext import (
 # ---------- ENV ----------
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-    raise RuntimeError("TELEGRAM_TOKEN is not set")
+    raise RuntimeError("TELEGRAM_TOKEN не задано")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 PUBLIC_URL = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or ""
@@ -40,11 +46,16 @@ CURRENCY = "XTR"  # Stars
 DB_PATH = "bot.sqlite3"
 
 # ---------- OpenAI ----------
+# Обнови пакет до свежего в requirements.txt:
+# openai==1.51.2  (или актуальная стабильная)
 from openai import OpenAI
+import httpx
+
 oai_client: Optional[OpenAI] = None
 if OPENAI_API_KEY:
-    oai_client = OpenAI(api_key=OPENAI_API_KEY)
-
+    # Явно создаём httpx-клиент без прокси
+    _http = httpx.Client(timeout=30.0)
+    oai_client = OpenAI(api_key=OPENAI_API_KEY, http_client=_http)
 
 # ---------- DB utils ----------
 def today_key() -> str:
@@ -86,16 +97,18 @@ async def init_db():
 
 async def ensure_user(user_id: int, referrer_id: int | None = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT OR IGNORE INTO users(user_id, premium_until, referrer_id)
-            VALUES(?, 0, ?)
-        """, (user_id, referrer_id))
+        await db.execute(
+            "INSERT OR IGNORE INTO users(user_id, premium_until, referrer_id) VALUES(?, 0, ?)",
+            (user_id, referrer_id),
+        )
         await db.commit()
 
 async def get_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT premium_until, referrer_id FROM users WHERE user_id=?",
-                              (user_id,)) as cur:
+        async with db.execute(
+            "SELECT premium_until, referrer_id FROM users WHERE user_id=?",
+            (user_id,),
+        ) as cur:
             row = await cur.fetchone()
             return row if row else (0, None)
 
@@ -121,8 +134,10 @@ async def add_premium_days(user_id: int, days: int):
     base = max(pu, now())
     new_until = base + days * 86400
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET premium_until=? WHERE user_id=?",
-                         (new_until, user_id))
+        await db.execute(
+            "UPDATE users SET premium_until=? WHERE user_id=?",
+            (new_until, user_id)
+        )
         await db.commit()
     return new_until
 
@@ -163,17 +178,13 @@ async def inc_usage(day: str, user_id: int, kind: str):
             )
         await db.commit()
 
-
 # ---------- Keyboards ----------
 def premium_keyboard():
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"День безлимита · {PRICE_DAY}⭐", callback_data="buy:day"),
-    ],[
-        InlineKeyboardButton(f"Неделя безлимита · {PRICE_WEEK}⭐", callback_data="buy:week"),
-    ],[
-        InlineKeyboardButton(f"Месяц безлимита · {PRICE_MONTH}⭐", callback_data="buy:month"),
-    ]])
-
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"День безлимита · {PRICE_DAY}⭐", callback_data="buy:day")],
+        [InlineKeyboardButton(f"Неделя безлимита · {PRICE_WEEK}⭐", callback_data="buy:week")],
+        [InlineKeyboardButton(f"Месяц безлимита · {PRICE_MONTH}⭐", callback_data="buy:month")],
+    ])
 
 # ---------- Handlers ----------
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -278,87 +289,36 @@ async def successful(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
 # ---- OpenAI helpers ----
-from openai import OpenAI
 async def solve_text_with_openai(prompt: str) -> str:
-    if not OPENAI_API_KEY:
+    if not oai_client:
         return "OpenAI ключ не задан. Добавь его в переменные окружения."
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.chat.completions.create(
+    resp = oai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role":"system","content":"Ты кратко решаешь задачи и объясняешь ход решения."},
-            {"role":"user","content":prompt}
+            {"role": "system", "content": "Ты кратко решаешь задачи и объясняешь ход решения."},
+            {"role": "user", "content": prompt},
         ],
         temperature=0.2,
-        max_tokens=600
+        max_tokens=600,
     )
     return resp.choices[0].message.content.strip()
 
 async def solve_image_with_openai(file_url: str, question: str) -> str:
-    if not OPENAI_API_KEY:
+    if not oai_client:
         return "OpenAI ключ не задан. Добавь его в переменные окружения."
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    resp = client.chat.completions.create(
+    resp = oai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{
-            "role":"user",
-            "content":[
-                {"type":"text","text":question or "Разбери и реши то, что на фото."},
-                {"type":"image_url","image_url":{"url": file_url}}
-            ]
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question or "Разбери и реши то, что на фото."},
+                {"type": "image_url", "image_url": {"url": file_url}},
+            ],
         }],
         temperature=0.2,
-        max_tokens=700
+        max_tokens=700,
     )
     return resp.choices[0].message.content.strip()
-
-# ---- Business logic: text/photo limits ----
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    text = update.message.text or ""
-
-    if await is_premium(chat_id):
-        answer = await solve_text_with_openai(text)
-        await update.message.reply_text(answer)
-        return
-
-    day = today_key()
-    used_texts, _ = await get_usage(day, chat_id)
-    if used_texts >= FREE_TEXTS_PER_DAY:
-        await update.message.reply_text(
-            "Лимит на сегодня исчерпан. Купи премиум в /premium, чтобы получить безлимит 🙂"
-        )
-        return
-
-    await inc_usage(day, chat_id, "text")
-    answer = await solve_text_with_openai(text)
-    await update.message.reply_text(answer)
-
-async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    caption = update.message.caption or ""
-
-    photo = update.message.photo[-1]
-    file = await ctx.bot.get_file(photo.file_id)
-    file_url = file.file_path
-
-    if await is_premium(chat_id):
-        answer = await solve_image_with_openai(file_url, caption)
-        await update.message.reply_text(answer)
-        return
-
-    day = today_key()
-    _, used_photos = await get_usage(day, chat_id)
-    if used_photos >= FREE_PHOTOS_PER_DAY:
-        await update.message.reply_text(
-            "Лимит фото на сегодня исчерпан. Купи премиум в /premium → безлимит 🙂"
-        )
-        return
-
-    await inc_usage(day, chat_id, "photo")
-    answer = await solve_image_with_openai(file_url, caption)
-    await update.message.reply_text(answer)
-
 
 # ---------- App ----------
 def build_app() -> Application:
@@ -376,7 +336,6 @@ def build_app() -> Application:
 
     return app
 
-
 def main():
     asyncio.run(init_db())
     app = build_app()
@@ -392,7 +351,6 @@ def main():
         drop_pending_updates=True,
         stop_signals=None,
     )
-
 
 if __name__ == "__main__":
     main()
