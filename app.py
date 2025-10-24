@@ -379,18 +379,22 @@ def build_app() -> Application:
 
 def main():
     asyncio.run(init_db())
+    app = build_app()
 
-    app = build_app()  # <- создаём app здесь и дальше используем ЭТО имя
-
-    # фиксированный путь вебхука
     webhook_path = os.getenv("WEBHOOK_PATH") or f"/webhook/{TOKEN.split(':')[0]}"
     webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
-
     print(f"[BOOT] Setting webhook to: {webhook_url}")
+
+    # >>> ФИКС для Python 3.13
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    # <<<
 
     app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.getenv("PORT") or 8080),  # ВАЖНО: port=, не PORT=
+        port=int(os.getenv("PORT") or 8080),
         url_path=webhook_path,
         webhook_url=webhook_url,
         drop_pending_updates=True,
