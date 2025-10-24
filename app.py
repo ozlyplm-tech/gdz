@@ -381,17 +381,16 @@ def main():
     asyncio.run(init_db())
     app = build_app()
 
-    # === фиксируем вебхук-путь ===
-    webhook_path = os.getenv("WEBHOOK_PATH") or f"/webhook/{TOKEN.split(':')[0]}"
-    webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
+    # перед запуском всё ок:
+webhook_path = os.getenv("WEBHOOK_PATH") or f"/webhook/{TOKEN.split(':')[0]}"
+webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
+print(f"[BOOT] Setting webhook to: {webhook_url}")
 
-    print(f"[BOOT] Setting webhook to: {webhook_url}")  # простой лог
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=webhook_path,
-        webhook_url=webhook_url,
-        drop_pending_updates=True,
-        stop_signals=None,
-    )
+app.run_webhook(
+    listen="0.0.0.0",
+    port=int(os.getenv("PORT") or 8080),   # ← ВАЖНО: port=, не PORT=
+    url_path=webhook_path,
+    webhook_url=webhook_url,
+    drop_pending_updates=True,
+    stop_signals=None,
+)
