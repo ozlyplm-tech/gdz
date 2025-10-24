@@ -378,12 +378,22 @@ def build_app() -> Application:
     return app
 
 def main():
-    asyncio.run(init_db())
+    # Создаём/назначаем event loop (Python 3.13 без этого ругается)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    # Инициализация БД в том же loop (НЕ через asyncio.run)
+    loop.run_until_complete(init_db())
+
     app = build_app()
 
     webhook_path = f"/bot{os.urandom(8).hex()}"
     webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
 
+    # Синхронный запуск вебхука; внутри использует текущий loop
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
@@ -393,5 +403,3 @@ def main():
         stop_signals=None,
     )
 
-if __name__ == "__main__":
-    main()
