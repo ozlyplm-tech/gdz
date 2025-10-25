@@ -30,10 +30,10 @@ if not PUBLIC_URL:
 
 PORT = int(os.getenv("PORT") or 8080)
 
-# цены в Stars (расписал здесь)
-PRICE_DAY   = int(os.getenv("PREMIUM_DAY",   "99"))   # 1 день
-PRICE_WEEK  = int(os.getenv("PREMIUM_WEEK",  "299"))  # 7 дней
-PRICE_MONTH = int(os.getenv("PREMIUM_MONTH", "399"))  # 30 дней
+# цены в Stars
+PRICE_DAY   = int(os.getenv("PREMIUM_DAY",   "199"))  # 1 день — 199⭐
+PRICE_WEEK  = int(os.getenv("PREMIUM_WEEK",  "399"))  # 1 неделя — 399⭐
+PRICE_MONTH = int(os.getenv("PREMIUM_MONTH", "599"))  # 1 месяц — 599⭐
 REF_BONUS_DAYS = int(os.getenv("REF_BONUS_DAYS", "2"))
 
 # бесплатные лимиты
@@ -205,6 +205,12 @@ def back_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")]
     ])
 
+# helper: корректно добавляет «назад» даже если inline_keyboard — tuple
+def with_back(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
+    rows = [list(row) for row in markup.inline_keyboard]
+    rows.append([InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")])
+    return InlineKeyboardMarkup(rows)
+
 # ---------- OpenAI helpers ----------
 async def solve_text_with_openai(prompt: str) -> str:
     if not oai_client:
@@ -320,7 +326,6 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "buy":
         pu, _ = await get_user(chat_id)
         status = "🟢 Премиум до " + human_until(pu) if pu > now() else "⚪️ Обычный"
-        # расписал цены:
         text = (
             "💎 <b>Подписка</b>\n\n"
             f"Статус: {status}\n\n"
@@ -330,10 +335,10 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"• 1 неделя — <b>{PRICE_WEEK}⭐</b>\n"
             f"• 1 месяц — <b>{PRICE_MONTH}⭐</b>\n"
         )
-        kb_rows = premium_keyboard().inline_keyboard + [
-            [InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")]
-        ]
-        await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb_rows))
+        await q.edit_message_text(
+            text, parse_mode=ParseMode.HTML,
+            reply_markup=with_back(premium_keyboard())
+        )
 
     elif data == "ref":
         me = await ctx.bot.get_me()
@@ -364,22 +369,21 @@ async def cb_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         title, amount, days = "Месяц безлимита", PRICE_MONTH, 30
 
     payload = f"prem:{chat_id}:{days}:{now()}"
-    prices = [LabeledPrice(label=title, amount=amount)]  # amount — в Stars
+    prices = [LabeledPrice(label=title, amount=amount)]  # amount в Stars
 
-    # ВАЖНО: для Stars provider_token — пустая строка, currency="XTR"
+    # для Stars: currency="XTR", provider_token="" (или можно не передавать)
     await ctx.bot.send_invoice(
         chat_id=chat_id,
         title=title,
         description=f"Премиум на {days} дн. Безлимит ответов.",
         payload=payload,
-        currency=CURRENCY,            # "XTR"
+        currency=CURRENCY,
         prices=prices,
-        provider_token="",            # Stars не требуют провайдера
-        start_parameter=f"prem_{plan}"
+        provider_token="",
+        start_parameter=f"prem_{plan}",
     )
 
 async def precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # обязательно ответить ok=True
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -491,7 +495,7 @@ def main():
     webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
     print(f"[BOOT] Setting webhook to: {webhook_url}")
 
-    # фикc для Python 3.13
+    # фикс для Python 3.13
     try:
         asyncio.get_running_loop()
     except RuntimeError:
