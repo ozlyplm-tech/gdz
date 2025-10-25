@@ -1,6 +1,6 @@
-python-telegram-bot[webhooks]==21.6
-aiosqlite==0.20.0
-openai==1.51.2
-httpx==0.28.1
+aiosqlite
+httpx
+openai
+python-telegram-bot
 matplotlib
 pillow
