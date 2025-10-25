@@ -6,12 +6,12 @@ for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy"
 import time
 import asyncio
 import aiosqlite
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 from telegram import (
     Update, LabeledPrice, InlineKeyboardMarkup, InlineKeyboardButton,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ParseMode, ChatAction
 from telegram.ext import (
     Application, ApplicationBuilder, ContextTypes,
     CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -55,6 +55,96 @@ oai_client: Optional[OpenAI] = None
 if OPENAI_API_KEY:
     _http = httpx.Client(timeout=30.0)   # без прокси
     oai_client = OpenAI(api_key=OPENAI_API_KEY, http_client=_http)
+
+# ---------- Pretty image rendering ----------
+import io
+import textwrap
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+def _latexish_to_mathtext(s: str) -> str:
+    """Конвертируем \\[...], \\(...), $$...$$ в mathtext $...$."""
+    s = s.replace("\\[", "$").replace("\\]", "$")
+    s = s.replace("\\(", "$").replace("\\)", "$")
+    s = s.replace("$$", "$")
+    return s
+
+def render_answer_png(text: str) -> bytes:
+    """Рисуем аккуратный листок с решением и формулами. Возвращает PNG-байты."""
+    text = _latexish_to_mathtext(text)
+
+    wrapped_lines = []
+    for line in text.splitlines():
+        if line.strip().startswith("$") and line.strip().endswith("$"):
+            wrapped_lines.append(line)
+        else:
+            wrapped_lines.extend(textwrap.wrap(line, width=70) or [""])
+
+    height = max(1.0, 0.6 + 0.35 * len(wrapped_lines))
+    fig = plt.figure(figsize=(8.0, height), dpi=200)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
+
+    plt.rcParams.update({
+        "font.size": 12,
+        "font.family": "DejaVu Sans",
+        "mathtext.fontset": "dejavusans",
+    })
+
+    y = 0.95
+    for line in wrapped_lines:
+        ax.text(0.05, y, line, va="top", ha="left", wrap=True)
+        y -= 0.04
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.35)
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
+
+def _looks_math_heavy(t: str) -> bool:
+    t = t or ""
+    triggers = [
+        "\\frac", "\\sqrt", "\\sum", "\\int", "\\ge", "\\le", "\\neq",
+        "\\rightarrow", "\\left", "\\right", "\\cdot", "\\times",
+        "\\mathbb", "\\overline", "\\underline", "$", "^{", "_{"
+    ]
+    return len(t) > 700 or any(x in t for x in triggers)
+
+def _escape_html(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+async def _send_typing(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, sec: float = 0.8):
+    await ctx.bot.send_chat_action(chat_id, ChatAction.TYPING)
+    await asyncio.sleep(sec)
+
+async def _answer_with_thinking(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    make_text_coro: Callable[[], Awaitable[str]]
+):
+    """Показываем этапы и шлём либо текст, либо PNG с формулами."""
+    msg = await ctx.bot.send_message(chat_id, "🤔 Думаю над задачей…")
+    try:
+        await _send_typing(ctx, chat_id, 0.8)
+        await msg.edit_text("🧠 Анализирую условие…")
+        await _send_typing(ctx, chat_id, 0.8)
+        await msg.edit_text("📐 Составляю решение…")
+
+        text = await make_text_coro()
+
+        if _looks_math_heavy(text):
+            png = render_answer_png(text)
+            await msg.delete()
+            await ctx.bot.send_photo(chat_id, png, caption="Готово ✅")
+        else:
+            await msg.edit_text(_escape_html(text), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    except Exception as e:
+        try:
+            await msg.edit_text(f"Упс… {_escape_html(type(e).__name__)}")
+        except:
+            await ctx.bot.send_message(chat_id, f"Упс… {_escape_html(type(e).__name__)}")
 
 # ---------- DB utils ----------
 def today_key() -> str:
@@ -205,13 +295,17 @@ def back_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")]
     ])
 
-# helper: корректно добавляет «назад» даже если inline_keyboard — tuple
 def with_back(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
     rows = [list(row) for row in markup.inline_keyboard]
     rows.append([InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")])
     return InlineKeyboardMarkup(rows)
 
 # ---------- OpenAI helpers ----------
+STYLE = (
+    "Пиши для школьника. Структура: <b>Кратко условие</b>, <b>Шаги</b> (1–5), <b>Ответ</b>."
+    " Формулы отдавай в LaTeX-нотации (\\frac, \\sqrt, степени через ^), чтобы их можно было рендерить."
+)
+
 async def solve_text_with_openai(prompt: str) -> str:
     if not oai_client:
         return "OpenAI ключ не задан. Добавь его в переменные окружения."
@@ -219,11 +313,11 @@ async def solve_text_with_openai(prompt: str) -> str:
         resp = oai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "Ты кратко решаешь задачи и объясняешь ход решения."},
+                {"role": "system", "content": STYLE},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=900,
         )
         return resp.choices[0].message.content.strip()
     except RateLimitError:
@@ -240,12 +334,12 @@ async def solve_image_with_openai(file_url: str, question: str) -> str:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": question or "Разбери и реши то, что на фото."},
+                    {"type": "text", "text": (question or "Реши задачу по фото. ") + STYLE},
                     {"type": "image_url", "image_url": {"url": file_url}},
                 ],
             }],
             temperature=0.2,
-            max_tokens=700,
+            max_tokens=1000,
         )
         return resp.choices[0].message.content.strip()
     except RateLimitError:
@@ -371,15 +465,14 @@ async def cb_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     payload = f"prem:{chat_id}:{days}:{now()}"
     prices = [LabeledPrice(label=title, amount=amount)]  # amount в Stars
 
-    # для Stars: currency="XTR", provider_token="" (или можно не передавать)
     await ctx.bot.send_invoice(
         chat_id=chat_id,
         title=title,
         description=f"Премиум на {days} дн. Безлимит ответов.",
         payload=payload,
-        currency=CURRENCY,
+        currency=CURRENCY,   # XTR
         prices=prices,
-        provider_token="",
+        provider_token="",   # Stars не требуют провайдера
         start_parameter=f"prem_{plan}",
     )
 
@@ -426,8 +519,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
 
     if await is_premium(chat_id):
-        answer = await solve_text_with_openai(text)
-        await update.message.reply_text(answer)
+        await _answer_with_thinking(ctx, chat_id, lambda: solve_text_with_openai(text))
         return
 
     day = today_key()
@@ -440,8 +532,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await inc_usage(day, chat_id, "text")
-    answer = await solve_text_with_openai(text)
-    await update.message.reply_text(answer)
+    await _answer_with_thinking(ctx, chat_id, lambda: solve_text_with_openai(text))
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -452,8 +543,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     file_url = file.file_path
 
     if await is_premium(chat_id):
-        answer = await solve_image_with_openai(file_url, caption)
-        await update.message.reply_text(answer)
+        await _answer_with_thinking(ctx, chat_id, lambda: solve_image_with_openai(file_url, caption))
         return
 
     day = today_key()
@@ -466,8 +556,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await inc_usage(day, chat_id, "photo")
-    answer = await solve_image_with_openai(file_url, caption)
-    await update.message.reply_text(answer)
+    await _answer_with_thinking(ctx, chat_id, lambda: solve_image_with_openai(file_url, caption))
 
 # ---------- App ----------
 def build_app() -> Application:
