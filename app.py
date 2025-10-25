@@ -62,36 +62,48 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 def _latexish_to_mathtext(s: str) -> str:
+    # приводим распространённые маркеры к mathtext, лишние $ убираем
     s = s.replace("\\[", "$").replace("\\]", "$")
     s = s.replace("\\(", "$").replace("\\)", "$")
     s = s.replace("$$", "$")
     return s
 
 def _normalize_ops(line: str) -> str:
-    # немного «человечим» знаки в простых строках (не трогаем формулы в $...$)
-    if line.strip().startswith("$") and line.strip().endswith("$"):
+    # не трогаем строки, полностью заключённые в $, остальное «очеловечиваем»
+    t = line.strip()
+    if t.startswith("$") and t.endswith("$"):
         return line
     return (line
             .replace("\\cdot", "·")
+            .replace("\\times", "×")
             .replace("*", "·")
-            .replace("/", "÷")
             .replace(">=", "≥")
             .replace("<=", "≤")
+            .replace("--", "—")
+            .replace("\\", "")
             )
 
 def render_answer_png(text: str) -> bytes:
     text = _latexish_to_mathtext(text)
+
+    # переносы + замена операторов
     lines = []
     for raw in text.splitlines():
         raw = _normalize_ops(raw)
         if raw.strip().startswith("$") and raw.strip().endswith("$"):
             lines.append(raw)
         else:
-            lines.extend(textwrap.wrap(raw, width=70) or [""])
+            # мягкие переносы, чтобы картинка расширялась и по ширине
+            lines.extend(textwrap.wrap(raw, width=72) or [""])
 
-    height = max(1.0, 0.6 + 0.35 * len(lines))
-    fig = plt.figure(figsize=(8.0, height), dpi=200)
-    ax = fig.add_axes([0, 0, 1, 1]); ax.axis("off")
+    # адаптивные размеры полотна: и по ширине, и по высоте
+    max_len = max((len(l) for l in lines), default=40)
+    width_in  = min(12.5, max(7.0, max_len / 8.5))     # 7" .. 12.5"
+    height_in = min(18.0, max(6.0, 0.55 + 0.38 * len(lines)))
+
+    fig = plt.figure(figsize=(width_in, height_in), dpi=200)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis("off")
 
     plt.rcParams.update({
         "font.size": 12,
@@ -99,14 +111,15 @@ def render_answer_png(text: str) -> bytes:
         "mathtext.fontset": "dejavusans",
     })
 
-    y = 0.95
+    y = 0.96
     for line in lines:
         ax.text(0.05, y, line, va="top", ha="left", wrap=True)
-        y -= 0.04
+        y -= 0.042
 
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.35)
-    plt.close(fig); buf.seek(0)
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.4)
+    plt.close(fig)
+    buf.seek(0)
     return buf.getvalue()
 
 def _looks_math_heavy(t: str) -> bool:
@@ -129,7 +142,6 @@ SOLUTIONS: dict[int, str] = {}
 async def _think_and_prepare(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, coro: Callable[[], Awaitable[str]]
 ) -> None:
-    # показываем прогресс и кладём готовый текст в SOLUTIONS
     msg = await ctx.bot.send_message(chat_id, "🤔 Думаю над задачей…")
     try:
         await _send_typing(ctx, chat_id); await msg.edit_text("🧠 Анализирую условие…")
@@ -266,7 +278,7 @@ def with_back(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
 STYLE = (
     "Объясняй как в учебнике: блоки «Дано» и «Решение», нумерованные шаги 1–3."
     " Простые действия расписывай: произведение, подстановка, упрощение."
-    " Формулы — в LaTeX (\\frac, \\sqrt, степени ^). Итог — отдельной строкой «Ответ: …»."
+    " Формулы можешь давать в LaTeX (\\frac, \\sqrt, степени ^). Итог — отдельной строкой «Ответ: …»."
 )
 
 async def solve_text_with_openai(prompt: str) -> str:
@@ -325,8 +337,7 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt = (
             "🆕 <b>Новое задание</b>\n\n"
             f"Сегодня осталось: <b>{left}</b> из {FREE_TEXTS_PER_DAY} текстовых запросов.\n\n"
-            "Пришли задачу <b>текстом</b> (это рекомендуется).\n\n"
-            "⚠️ Фото больше не принимаем — только текст 😉"
+            "Пришли задачу <b>текстом</b> — решу и объясню по шагам."
         )
         await q.edit_message_text(txt, parse_mode=ParseMode.HTML, reply_markup=back_kb())
 
