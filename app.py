@@ -61,8 +61,7 @@ def _to_math_fractions(s: str) -> str:
 def _latexish_cleanup(s: str) -> str:
     # убрать все видимые $ и окружения \[ \]
     s = s.replace("\\[","").replace("\\]","").replace("\\(","").replace("\\)","")
-    s = s.replace("$$","")
-    s = s.replace("$","")
+    s = s.replace("$$","").replace("$","")
     return s
 
 def _normalize_ops(line: str) -> str:
@@ -74,13 +73,8 @@ def _normalize_ops(line: str) -> str:
             .replace(">=", "≥").replace("<=", "≤")
             )
 
-def _looks_math_heavy(t: str) -> bool:
-    t = t or ""
-    triggers = ["\\frac","\\sqrt","\\sum","\\int","^{","_{","→","≥","≤","÷","·","×"]
-    return len(t) > 600 or any(x in t for x in triggers)
-
 def render_answer_png(text: str) -> bytes:
-    # 1) чистим, 2) ставим \frac, 3) аккуратно оборачиваем math-строки в $
+    # чистим, ставим \frac, аккуратно оборачиваем math-строки в $
     text = _latexish_cleanup(text)
     text = _to_math_fractions(text)
 
@@ -90,9 +84,8 @@ def render_answer_png(text: str) -> bytes:
         if not raw:
             lines.append("")
             continue
-        # если есть явные LaTeX-конструкции — рисуем как mathtext
         if any(tok in raw for tok in ["\\frac","\\sqrt","^{","_{","\\int","\\sum"]):
-            lines.append(f"${raw}$")  # mathtext (в PNG $ не показывается)
+            lines.append(f"${raw}$")  # mathtext
         else:
             lines.extend(textwrap.wrap(_normalize_ops(raw), width=86) or [""])
 
@@ -164,7 +157,6 @@ async def init_db():
             photos INTEGER DEFAULT 0,
             PRIMARY KEY(day, user_id)
         )""")
-        # если таблица старая без photos — добавим колонку
         try:
             await db.execute("ALTER TABLE usage ADD COLUMN photos INTEGER DEFAULT 0")
         except Exception:
@@ -266,8 +258,9 @@ def with_back(markup: InlineKeyboardMarkup) -> InlineKeyboardMarkup:
 # ---------- OpenAI helpers ----------
 STYLE = (
     "Отвечай как в школьном решебнике: блок «Дано», далее «Решение» с нумерованными шагами."
-    " Показывай промежуточные вычисления. Используй LaTeX-команды (\\frac, \\sqrt, степени)."
-    " В конце отдельной строкой: «Ответ: …»."
+    " Показывай промежуточные вычисления. НЕ используй LaTeX-обёртки \\( \\) \\[ \\] и $$."
+    " Разрешены только сами команды типа \\frac, \\sqrt, степени ^{ }."
+    " Используй знаки × и ÷ вместо \\times и / в тексте. В конце отдельной строкой: «Ответ: …»."
 )
 
 async def solve_text_with_openai(prompt: str) -> str:
@@ -290,8 +283,9 @@ async def solve_image_with_openai(file_url: str, question: str) -> str:
         return "OpenAI ключ не задан."
     try:
         prompt = (question or "") + "\n"
-        prompt += ("Реши задачу по фото подробно: «Дано», далее шаги 1–3 (произведение/подстановка/упрощение), "
-                   "используй LaTeX (\\frac, \\sqrt). В конце строка «Ответ: …».")
+        prompt += ("Реши задачу по фото подробно: «Дано», шаги 1–3 (произведение/подстановка/упрощение). "
+                   "НЕ используй \\( \\) \\[ \\] и $$; разрешены \\frac, \\sqrt, степени. "
+                   "В тексте ставь × и ÷. В конце строка «Ответ: …».")
         resp = oai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{
@@ -308,6 +302,16 @@ async def solve_image_with_openai(file_url: str, question: str) -> str:
         return "Пока не могу — лимит OpenAI (429). Попробуй позже 🙏"
     except Exception as e:
         return f"Упс, ошибка: {type(e).__name__}"
+
+# ---- определить что это «математика» (рендерить PNG), а не сочинение
+MATH_RE = re.compile(r'(?=.*\d)(?=.*[+\-*/×÷=^])', re.S)
+def _is_math(text: str) -> bool:
+    t = text or ""
+    letters = sum(ch.isalpha() for ch in t)
+    ops     = sum(ch in "+-*/×÷=^" for ch in t)
+    if letters > 600 and ops < 5:  # длинное эссе — текстом
+        return False
+    return bool(MATH_RE.search(t)) or any(k in t for k in ["\\frac","\\sqrt","^{","_{"])
 
 # ---------- UI ----------
 WELCOME_TEXT = (
@@ -379,7 +383,7 @@ async def cb_show_solution(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text:
         await q.edit_message_text("Нет сохранённого решения. Пришли задачу снова 🙂", reply_markup=back_kb())
         return
-    if _looks_math_heavy(text):
+    if _is_math(text):          # <— ключевая замена
         png = render_answer_png(text)
         await ctx.bot.send_photo(chat_id, png, caption="Готово ✅", reply_markup=back_kb())
     else:
