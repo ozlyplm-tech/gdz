@@ -28,13 +28,12 @@ PUBLIC_URL      = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL") or
 if not PUBLIC_URL:
     raise RuntimeError("RENDER_EXTERNAL_URL (или PUBLIC_URL) не задан")
 
-# для Railway/Render и т.п. платформа сама пробрасывает PORT
 PORT = int(os.getenv("PORT") or 8080)
 
-# цены в Stars
-PRICE_DAY   = int(os.getenv("PREMIUM_DAY",   "99"))
-PRICE_WEEK  = int(os.getenv("PREMIUM_WEEK",  "299"))
-PRICE_MONTH = int(os.getenv("PREMIUM_MONTH", "399"))
+# цены в Stars (расписал здесь)
+PRICE_DAY   = int(os.getenv("PREMIUM_DAY",   "99"))   # 1 день
+PRICE_WEEK  = int(os.getenv("PREMIUM_WEEK",  "299"))  # 7 дней
+PRICE_MONTH = int(os.getenv("PREMIUM_MONTH", "399"))  # 30 дней
 REF_BONUS_DAYS = int(os.getenv("REF_BONUS_DAYS", "2"))
 
 # бесплатные лимиты
@@ -42,8 +41,8 @@ FREE_TEXTS_PER_DAY  = 20
 FREE_PHOTOS_PER_DAY = 10
 
 # платежи
-CURRENCY        = "XTR"  # Telegram Stars
-PROVIDER_TOKEN  = os.getenv("PROVIDER_TOKEN", "")  # возьми у @BotFather
+CURRENCY        = "XTR"      # Telegram Stars
+PROVIDER_TOKEN  = ""         # для Stars провайдер не нужен — оставляем пустую строку
 
 DB_PATH = "bot.sqlite3"
 
@@ -189,9 +188,9 @@ async def get_remaining(uid: int) -> tuple[int, int]:
 # ---------- Keyboards ----------
 def premium_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"День безлимита · {PRICE_DAY}⭐",   callback_data="buy:day")],
-        [InlineKeyboardButton(f"Неделя безлимита · {PRICE_WEEK}⭐", callback_data="buy:week")],
-        [InlineKeyboardButton(f"Месяц безлимита · {PRICE_MONTH}⭐", callback_data="buy:month")],
+        [InlineKeyboardButton(f"💎 День безлимита · {PRICE_DAY}⭐",   callback_data="buy:day")],
+        [InlineKeyboardButton(f"💎 Неделя безлимита · {PRICE_WEEK}⭐", callback_data="buy:week")],
+        [InlineKeyboardButton(f"💎 Месяц безлимита · {PRICE_MONTH}⭐", callback_data="buy:month")],
     ])
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -295,7 +294,6 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data = q.data.split(":", 1)[1]
     chat_id = q.message.chat.id
 
-    # Новое задание
     if data == "new":
         rem_t, rem_p = await get_remaining(chat_id)
         if rem_t > 0 or rem_p > 0:
@@ -319,21 +317,24 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ])
             await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-    # Подписка (экран)
     elif data == "buy":
         pu, _ = await get_user(chat_id)
         status = "🟢 Премиум до " + human_until(pu) if pu > now() else "⚪️ Обычный"
+        # расписал цены:
         text = (
             "💎 <b>Подписка</b>\n\n"
             f"Статус: {status}\n\n"
-            "Безлимит ответов и приоритет. Выбери тариф:"
+            "Безлимит ответов и приоритет.\n\n"
+            "<b>Тарифы:</b>\n"
+            f"• 1 день — <b>{PRICE_DAY}⭐</b>\n"
+            f"• 1 неделя — <b>{PRICE_WEEK}⭐</b>\n"
+            f"• 1 месяц — <b>{PRICE_MONTH}⭐</b>\n"
         )
         kb_rows = premium_keyboard().inline_keyboard + [
             [InlineKeyboardButton("⬅️ В главное меню", callback_data="menu:back")]
         ]
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb_rows))
 
-    # Реферальная ссылка
     elif data == "ref":
         me = await ctx.bot.get_me()
         ref_link = f"https://t.me/{me.username}?start=ref_{chat_id}"
@@ -344,7 +345,6 @@ async def menu_router(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         await q.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_kb(), disable_web_page_preview=True)
 
-    # Назад
     elif data == "back":
         await q.delete_message()
         await show_main_menu(chat_id, ctx)
@@ -363,29 +363,23 @@ async def cb_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         title, amount, days = "Месяц безлимита", PRICE_MONTH, 30
 
-    if not PROVIDER_TOKEN:
-        await q.edit_message_text(
-            "Для оплаты нужен <b>PROVIDER_TOKEN</b> от @BotFather.\n"
-            "Добавь переменную окружения и попробуй снова.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=back_kb()
-        )
-        return
-
     payload = f"prem:{chat_id}:{days}:{now()}"
-    prices = [LabeledPrice(label=title, amount=amount)]
+    prices = [LabeledPrice(label=title, amount=amount)]  # amount — в Stars
 
+    # ВАЖНО: для Stars provider_token — пустая строка, currency="XTR"
     await ctx.bot.send_invoice(
         chat_id=chat_id,
         title=title,
         description=f"Премиум на {days} дн. Безлимит ответов.",
         payload=payload,
-        currency=CURRENCY,
+        currency=CURRENCY,            # "XTR"
         prices=prices,
-        provider_token=PROVIDER_TOKEN,
+        provider_token="",            # Stars не требуют провайдера
+        start_parameter=f"prem_{plan}"
     )
 
 async def precheckout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # обязательно ответить ok=True
     await update.pre_checkout_query.answer(ok=True)
 
 async def successful(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -497,12 +491,11 @@ def main():
     webhook_url  = f"{PUBLIC_URL.rstrip('/')}{webhook_path}"
     print(f"[BOOT] Setting webhook to: {webhook_url}")
 
-    # >>> ФИКС для Python 3.13
+    # фикc для Python 3.13
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
-    # <<<
 
     app.run_webhook(
         listen="0.0.0.0",
